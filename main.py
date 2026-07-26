@@ -141,7 +141,14 @@ def handle_message(message):
                         "content": result
                     })
         else:
-            final_text = msg.content.strip()
+            # Safely handle cases where the LLM returns None for content
+            raw_content = msg.content or ""
+            final_text = raw_content.strip()
+
+            if not final_text:
+                bot.reply_to(message, "Received an empty response from the model. Please try again.")
+                break
+
             chat_histories[chat_id].append({"role": "assistant", "content": final_text})
             log_to_jsonl({"event": "assistant_reply", "chat_id": chat_id, "text": final_text})
             
