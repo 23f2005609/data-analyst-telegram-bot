@@ -1,0 +1,6 @@
+__pycache__/
+.vscode/
+logs/
+tds-p1-t2-2026-telegram-bot/
+*.jsonl
+.env
