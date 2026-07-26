@@ -110,7 +110,7 @@ def handle_message(message):
         try:
             response = client.chat.completions.create(
                 # 3. Use an OpenRouter formatted model name that supports tool calling
-                model="openrouter/free", 
+                model="google/gemini-2.0-flash-lite-preview-02-05:free", 
                 messages=chat_histories[chat_id],
                 tools=tools,
                 temperature=0.0
