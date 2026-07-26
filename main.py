@@ -12,7 +12,6 @@ import uvicorn
 from openai import OpenAI
 
 # ----------------- CONFIGURATION -----------------
-# 1. Swap OPENAI_API_KEY for your AI Pipe token
 AI_PIPE_TOKEN = os.getenv("AI_PIPE_TOKEN", "YOUR_AI_PIPE_TOKEN")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN")
 BASE_URL = os.getenv("BASE_URL", "http://127.0.0.1:8000")
@@ -20,7 +19,6 @@ BASE_URL = os.getenv("BASE_URL", "http://127.0.0.1:8000")
 # ----------------- INITIALIZATION ----------------
 bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
 
-# 2. Redirect the OpenAI client to AI Pipe's OpenRouter endpoint
 client = OpenAI(
     api_key=AI_PIPE_TOKEN,
     base_url="https://aipipe.org/openrouter/v1"
@@ -28,12 +26,11 @@ client = OpenAI(
 
 app = FastAPI()
 
-# ADD THIS: A simple health-check route to stop the 404 errors
+# Health check route for cron-job.org / Render
 @app.get("/")
 def health_check():
     return {"status": "Bot is awake and running!"}
 
-# Ensure the logs directory exists
 os.makedirs("logs", exist_ok=True)
 LOG_FILE = "logs/run.jsonl"
 app.mount("/logs", StaticFiles(directory="logs"), name="logs")
@@ -66,12 +63,14 @@ def handle_start(message):
     chat_id = message.chat.id
     chat_histories[chat_id] = []
     chat_envs[chat_id] = {}
+    print(f"--- [MEMORY RESET] Chat ID: {chat_id} ---", flush=True)
     bot.reply_to(message, "Bot memory reset and ready for new tasks.")
 
 @bot.message_handler(func=lambda message: True)
 def handle_message(message):
     chat_id = message.chat.id
     user_text = message.text
+    print(f"\n--- [NEW TELEGRAM MESSAGE]: {user_text}", flush=True)
     
     if chat_id not in chat_histories or not chat_histories[chat_id]:
         chat_histories[chat_id] = [
@@ -111,22 +110,31 @@ def handle_message(message):
         }
     }]
     
-    while True:
+    max_turns = 10
+    turn_count = 0
+    empty_count = 0
+    
+    while turn_count < max_turns:
+        turn_count += 1
+        print(f"Calling LLM API (Turn {turn_count}/{max_turns})...", flush=True)
         try:
             response = client.chat.completions.create(
-                # 3. Use an OpenRouter formatted model name that supports tool calling
-                model="openai/gpt-oss-20b:free", 
+                model="openrouter/free", 
                 messages=chat_histories[chat_id],
                 tools=tools,
                 temperature=0.0
             )
         except Exception as e:
-            bot.reply_to(message, f"API Error: {str(e)}")
+            err_msg = f"API Error: {str(e)}"
+            print(f"❌ {err_msg}", flush=True)
+            bot.reply_to(message, err_msg)
             return
             
         msg = response.choices[0].message
         
+        # Handle Tool Call execution
         if msg.tool_calls:
+            print(f"🛠️ Model invoked {len(msg.tool_calls)} tool call(s)", flush=True)
             chat_histories[chat_id].append(msg.model_dump(exclude_unset=True))
             log_to_jsonl({"event": "tool_call", "chat_id": chat_id, "tool_calls": [tc.model_dump() for tc in msg.tool_calls]})
             
@@ -134,9 +142,11 @@ def handle_message(message):
                 if tool_call.function.name == "execute_python":
                     args = json.loads(tool_call.function.arguments)
                     code = args.get("code", "")
+                    print(f"🐍 Executing Code:\n{code}", flush=True)
                     
                     log_to_jsonl({"event": "execute_python_start", "code": code})
                     result = execute_python(code, chat_id)
+                    print(f"📤 Code Output:\n{result}", flush=True)
                     log_to_jsonl({"event": "execute_python_result", "result": result})
                     
                     chat_histories[chat_id].append({
@@ -145,15 +155,20 @@ def handle_message(message):
                         "name": "execute_python",
                         "content": result
                     })
+        # Handle Final Assistant Response
         else:
-            # Safely handle cases where the LLM returns None for content
             raw_content = msg.content or ""
             final_text = raw_content.strip()
+            print(f"💬 Model output text: {final_text[:100]}...", flush=True)
 
             if not final_text:
-                # If the model glitches and sends a blank message, prompt it to try again
-                chat_histories[chat_id].append({"role": "user", "content": "You returned an empty response. Please analyze the data and output the final JSON."})
-                continue # Loops back to the top of the while True loop to try again
+                empty_count += 1
+                if empty_count >= 3:
+                    bot.reply_to(message, "Model kept returning empty responses. Please send /start to try again.")
+                    return
+                print("⚠️ Empty content received, prompting model to proceed...", flush=True)
+                chat_histories[chat_id].append({"role": "user", "content": "Please analyze the data and reply with the requested JSON object."})
+                continue
 
             chat_histories[chat_id].append({"role": "assistant", "content": final_text})
             log_to_jsonl({"event": "assistant_reply", "chat_id": chat_id, "text": final_text})
@@ -172,13 +187,16 @@ def handle_message(message):
             try:
                 response_json = json.loads(clean_text)
                 response_json["log_url"] = f"{BASE_URL.rstrip('/')}/logs/run.jsonl"
+                print("✅ Final JSON structured successfully. Sending reply to Telegram...", flush=True)
                 bot.reply_to(message, json.dumps(response_json))
             except json.JSONDecodeError:
+                print("⚠️ Output was not strict JSON. Sending raw response...", flush=True)
                 bot.reply_to(message, final_text)
                 
             break 
 
 def run_telebot():
+    print("🚀 Starting Telegram Bot polling thread...", flush=True)
     bot.infinity_polling()
 
 @app.on_event("startup")
