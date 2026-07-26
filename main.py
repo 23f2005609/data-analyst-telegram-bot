@@ -28,6 +28,11 @@ client = OpenAI(
 
 app = FastAPI()
 
+# ADD THIS: A simple health-check route to stop the 404 errors
+@app.get("/")
+def health_check():
+    return {"status": "Bot is awake and running!"}
+
 # Ensure the logs directory exists
 os.makedirs("logs", exist_ok=True)
 LOG_FILE = "logs/run.jsonl"
@@ -146,8 +151,9 @@ def handle_message(message):
             final_text = raw_content.strip()
 
             if not final_text:
-                bot.reply_to(message, "Received an empty response from the model. Please try again.")
-                break
+                # If the model glitches and sends a blank message, prompt it to try again
+                chat_histories[chat_id].append({"role": "user", "content": "You returned an empty response. Please analyze the data and output the final JSON."})
+                continue # Loops back to the top of the while True loop to try again
 
             chat_histories[chat_id].append({"role": "assistant", "content": final_text})
             log_to_jsonl({"event": "assistant_reply", "chat_id": chat_id, "text": final_text})
